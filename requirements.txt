@@ -3,6 +3,7 @@ faster-whisper
 av<19
 anthropic
 google-genai
+groq
 opencv-python
 numpy
 rich

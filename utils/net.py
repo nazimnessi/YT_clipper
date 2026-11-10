@@ -55,3 +55,10 @@ def genai_kwargs() -> dict:
         return {}
     from google.genai import types
     return {"http_options": types.HttpOptions(client_args={"verify": False})}
+
+
+def groq_kwargs() -> dict:
+    if not _INSECURE:
+        return {}
+    import httpx
+    return {"http_client": httpx.Client(verify=False)}

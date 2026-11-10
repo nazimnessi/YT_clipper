@@ -9,7 +9,7 @@ ingest → highlight → for each clip: fetch → transcribe → frame → rende
 | Step | File | What it does |
 |---|---|---|
 | ingest | `ingest.py` | Video details, YouTube captions, the most-replayed heatmap, chapters and top comments. Doesn't download the video. |
-| highlight | `highlight.py` | Picks the best moments. Claude goes first, then Gemini, then a free heuristic. |
+| highlight | `highlight.py` | Picks the best moments using a ranked Claude, Gemini, and Groq model chain, then a free heuristic. |
 | fetch | `fetch.py` | Downloads only each clip's time range. |
 | transcribe | `transcribe.py` | Whisper gives exact word timings, then each clip's start and end are moved onto natural pauses. |
 | frame | `frame.py` | Finds shot changes and faces, then picks **single** (one face), **stacked** (two people, one on top of the other) or **wide** (whole frame) for each shot. |
@@ -51,10 +51,11 @@ Copy `.env.example` to `.env` and fill in your keys:
 
 | Key | Where to get it | Needed? |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | https://console.anthropic.com → API keys | Recommended: makes the best highlight picks (paid, a few cents per video) |
-| `GEMINI_API_KEY` | https://aistudio.google.com/apikey | Optional: free fallback. On the free tier, Google may use your prompts to improve its products. |
+| `ANTHROPIC_API_KEY` | https://console.anthropic.com → API keys | Optional: enables Claude models in the ranked highlight chain. |
+| `GEMINI_API_KEY` | https://aistudio.google.com/apikey | Optional: enables Gemini models in the ranked highlight chain. On the free tier, Google may use your prompts to improve its products. |
+| `GROQ_API_KEY` | https://console.groq.com/keys | Optional: enables Groq models in the ranked highlight chain. |
 
-If neither key is set, the free heuristic picks the clips. It works, but the picks are worse.
+If none of these keys is set, the free heuristic picks the clips. It works, but the picks are worse.
 
 ### Downloaded automatically on first run
 | What | Size | Saved to |
@@ -86,7 +87,7 @@ If you don't give `--url`, the script uses the **first row of `input_video.xlsx`
 | `--clips` | 3 | number of clips |
 | `--min-sec` / `--max-sec` | 20 / 59 | allowed clip length |
 | `--layout` | auto | `auto` / `single` / `stacked` / `wide` (use `stacked` to force two people top and bottom) |
-| `--ai` | auto | `auto` (Claude, then Gemini, then heuristic) / `claude` / `gemini` / `heuristic` |
+| `--ai` | auto | `auto` (ranked Claude, Gemini, and Groq models, then heuristic) / `claude` / `gemini` / `groq` / `heuristic` |
 | `--whisper-model` | small | `tiny` / `base` / `small` / `medium` / `large-v3` |
 | `--whisper-device` | auto | `auto` / `cpu` / `cuda` |
 | `--language` | auto | spoken language, for example `en`, `hi`, `ml` |
@@ -100,16 +101,19 @@ If you don't give `--url`, the script uses the **first row of `input_video.xlsx`
 | `--config` | config.yaml | settings file |
 
 Command-line options override `config.yaml`, which overrides the built-in defaults.
-If the configured Gemini model fails, the app tries `gemini_fallback_models` in
-`config.yaml` order. It logs each attempt and switch, then uses the heuristic
-picker if no configured Gemini model can answer. You can edit that list to match
-the models available to your API key.
+`config.yaml` contains the mixed-provider `ai_model_hierarchy`, ordered for
+quality first. The app skips providers without keys and tries each remaining
+model in sequence before falling back to the heuristic picker. Edit the list to
+change its priority or match the models enabled for your API keys. Set
+`GROQ_API_KEY` in `.env` to enable Groq models. Use `--ai groq` to restrict a
+run to Groq models.
 
 ### Examples
 ```powershell
 python main.py --url "https://youtu.be/ID" --clips 5 --max-sec 45
 python main.py --url "https://youtu.be/ID" --layout stacked          # podcast / meeting
 python main.py --url "https://youtu.be/ID" --ai gemini --whisper-model base
+python main.py --url "https://youtu.be/ID" --ai groq
 python main.py --url "https://youtu.be/ID" --upload --privacy unlisted
 ```
 

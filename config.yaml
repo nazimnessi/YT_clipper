@@ -12,18 +12,22 @@ clips:
   pad_sec: 3 # extra seconds downloaded around each clip
 
 ai:
-  ai: auto # auto (Claude -> Gemini -> heuristic) | claude | gemini | heuristic
-  claude_model: claude-sonnet-5-5
-  gemini_model: gemini-3.8-flash
-  gemini_fallback_models:
-    - gemini-4-carbon
-    - gemini-4-argon
-    - gemini-3.6-flash
-    - gemini-3.5-flash-lite
-    - gemini-3.1-flash-lite
-    - gemini-3-flash-preview
-    - gemini-3.1-pro-preview
-    - gemini-2.5-flash-lite
+  ai: auto # ranked mixed-provider fallback; or limit to claude | gemini | groq | heuristic
+  # Quality-first order; "provider:model". Unavailable keys/models are skipped.
+  ai_model_hierarchy:
+    - claude:claude-fable-5-2
+    - gemini:gemini-4-carbon
+    - claude:claude-opus-5-5
+    - groq:openai/gpt-oss-120b
+    - gemini:gemini-4-argon
+    - groq:moonshotai/kimi-k2-instruct-0905
+    - claude:claude-sonnet-5-5
+    - gemini:gemini-3.8-flash
+    - groq:qwen/qwen3.8-27b
+    - gemini:gemini-3.6-flash
+    - groq:llama-3.3-70b-versatile
+    - claude:claude-haiku-5-5
+    - gemini:gemini-3.5-flash-lite
 
 transcription:
   whisper_model: small # tiny | base | small | medium | large-v3  (bigger = better, slower)

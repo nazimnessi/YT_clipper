@@ -7,7 +7,7 @@ from typing import Literal, Optional
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SubtitleStyle(BaseModel):
@@ -34,18 +34,21 @@ class Settings(BaseModel):
     pad_sec: float = 3.0                   # extra seconds downloaded around each clip
 
     # AI
-    ai: Literal["auto", "claude", "gemini", "heuristic"] = "auto"
-    claude_model: str = "claude-sonnet-5-5"
-    gemini_model: str = "gemini-3.8-flash"
-    gemini_fallback_models: list[str] = Field(default_factory=lambda: [
-        "gemini-4-carbon",
-        "gemini-4-argon",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite",
-        "gemini-3-flash-preview",
-        "gemini-3.1-pro-preview",
-        "gemini-2.5-flash-lite",
+    ai: Literal["auto", "claude", "gemini", "groq", "heuristic"] = "auto"
+    ai_model_hierarchy: list[str] = Field(default_factory=lambda: [
+        "claude:claude-fable-5-2",
+        "gemini:gemini-4-carbon",
+        "claude:claude-opus-5-5",
+        "groq:openai/gpt-oss-120b",
+        "gemini:gemini-4-argon",
+        "groq:moonshotai/kimi-k2-instruct-0905",
+        "claude:claude-sonnet-5-5",
+        "gemini:gemini-3.8-flash",
+        "groq:qwen/qwen3.8-27b",
+        "gemini:gemini-3.6-flash",
+        "groq:llama-3.3-70b-versatile",
+        "claude:claude-haiku-5-5",
+        "gemini:gemini-3.5-flash-lite",
     ])
 
     # transcription
@@ -86,6 +89,16 @@ class Settings(BaseModel):
             raise ValueError(f"max_sec ({self.max_sec}) must be greater than min_sec ({self.min_sec})")
         return self
 
+    @field_validator("ai_model_hierarchy")
+    @classmethod
+    def _check_ai_model_hierarchy(cls, models):
+        providers = {"claude", "gemini", "groq"}
+        for entry in models:
+            provider, separator, model = entry.partition(":")
+            if not separator or provider not in providers or not model.strip():
+                raise ValueError(f"invalid AI model hierarchy entry: {entry!r}")
+        return models
+
 
 def build_parser(standalone: bool = False) -> argparse.ArgumentParser:
     S = argparse.SUPPRESS  # only arguments actually given override config.yaml
@@ -99,7 +112,8 @@ def build_parser(standalone: bool = False) -> argparse.ArgumentParser:
     p.add_argument("--min-sec", dest="min_sec", type=float, help="min clip length (default 20)")
     p.add_argument("--max-sec", dest="max_sec", type=float, help="max clip length (default 59)")
     p.add_argument("--layout", choices=["auto", "single", "stacked", "wide"], help="framing (default auto)")
-    p.add_argument("--ai", choices=["auto", "claude", "gemini", "heuristic"], help="highlight AI (default auto)")
+    p.add_argument("--ai", choices=["auto", "claude", "gemini", "groq", "heuristic"],
+                   help="highlight AI (default auto)")
     p.add_argument("--whisper-model", dest="whisper_model", help="tiny|base|small|medium|large-v3")
     p.add_argument("--whisper-device", dest="whisper_device", choices=["auto", "cpu", "cuda"])
     p.add_argument("--language", help="spoken language code, e.g. en, hi (default auto)")

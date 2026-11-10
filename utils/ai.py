@@ -1,4 +1,4 @@
-"""AI chain: Claude -> Gemini. Returns validated JSON or raises AIUnavailable (caller then uses heuristics)."""
+"""Ranked Claude, Gemini, and Groq models; returns validated JSON or raises AIUnavailable."""
 from __future__ import annotations
 
 import json
@@ -15,10 +15,10 @@ class AIUnavailable(Exception):
     pass
 
 
-def _claude(prompt: str, s, max_tokens: int) -> str:
+def _claude(prompt: str, max_tokens: int, model: str) -> str:
     import anthropic
     client = anthropic.Anthropic(timeout=180, max_retries=0, **net.anthropic_kwargs())
-    msg = client.messages.create(model=s.claude_model, max_tokens=max_tokens,
+    msg = client.messages.create(model=model, max_tokens=max_tokens,
                                  messages=[{"role": "user", "content": prompt}])
     return "".join(getattr(b, "text", "") for b in msg.content)
 
@@ -35,14 +35,37 @@ def _gemini(prompt: str, max_tokens: int, model: str) -> str:
     return resp.text or ""
 
 
+def _groq(prompt: str, max_tokens: int, model: str) -> str:
+    from groq import Groq
+    with Groq(timeout=180, max_retries=0, **net.groq_kwargs()) as client:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=max_tokens,
+        )
+    return resp.choices[0].message.content or ""
+
+
 PROVIDERS = {
     "claude": (_claude, lambda: bool(os.environ.get("ANTHROPIC_API_KEY"))),
     "gemini": (_gemini, lambda: bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))),
+    "groq": (_groq, lambda: bool(os.environ.get("GROQ_API_KEY"))),
 }
 
 
-def chain(s) -> list[str]:
-    return {"auto": ["claude", "gemini"], "claude": ["claude"], "gemini": ["gemini"], "heuristic": []}[s.ai]
+def model_chain(s) -> list[tuple[str, str]]:
+    allowed = {"claude", "gemini", "groq"} if s.ai == "auto" else {s.ai}
+    models = []
+    seen = set()
+    for entry in s.ai_model_hierarchy:
+        provider, separator, model = entry.partition(":")
+        if not separator or provider not in PROVIDERS or not model:
+            raise ValueError(f"invalid AI model hierarchy entry: {entry!r}")
+        candidate = (provider, model)
+        if provider in allowed and candidate not in seen:
+            models.append(candidate)
+            seen.add(candidate)
+    return models
 
 
 def extract_json(text: str):
@@ -55,55 +78,41 @@ def extract_json(text: str):
     return obj
 
 
-def _gemini_models(s) -> list[str]:
-    return list(dict.fromkeys(model for model in [s.gemini_model, *s.gemini_fallback_models] if model))
-
-
 def ask_json(prompt: str, schema, s, log, what: str = "AI request", max_tokens: int = 4096):
-    """Try providers and configured Gemini models. Returns (parsed, provider_name)."""
+    """Try configured models in ranked order. Returns (parsed, provider:model)."""
     adapter = TypeAdapter(schema)
-    for name in chain(s):
+    models = model_chain(s)
+    missing_keys = set()
+    for index, (name, model) in enumerate(models):
         fn, has_key = PROVIDERS[name]
         if not has_key():
-            log.info(f"{name}: no API key set, skipping")
+            if name not in missing_keys:
+                log.info(f"{name}: no API key set, skipping its models")
+                missing_keys.add(name)
             continue
 
-        models = _gemini_models(s) if name == "gemini" else [None]
-        for index, model in enumerate(models):
-            if model:
-                log.info(f"{what}: trying Gemini model {model} ({index + 1}/{len(models)})")
+        label = f"{name}:{model}"
+        log.info(f"{what}: trying {label} ({index + 1}/{len(models)})")
 
-            def call():
-                if model:
-                    text = fn(prompt, max_tokens, model=model)
-                else:
-                    text = fn(prompt, s, max_tokens)
-                log.debug(f"{name} raw reply ({len(text)} chars): {text[:1500]}")
-                return adapter.validate_python(extract_json(text))
+        def call():
+            text = fn(prompt, max_tokens, model)
+            log.debug(f"{label} raw reply ({len(text)} chars): {text[:1500]}")
+            return adapter.validate_python(extract_json(text))
 
-            try:
-                result = retry(
-                    call, attempts=3, log=log,
-                    what=f"{what} via {name}" + (f" ({model})" if model else ""),
-                    retry_if=(lambda e: getattr(e, "code", None) != 404) if model else None,
-                )
-                if model:
-                    log.info(f"{what}: answered by Gemini model {model}")
-                else:
-                    log.info(f"{what}: answered by {name}")
-                return result, name
-            except ImportError as e:
-                log.warning(f"{name}: library not installed ({e})")
-                break
-            except (ValidationError, ValueError) as e:
-                log.warning(f"{name}" + (f" model {model}" if model else "") +
-                            f": reply was not valid JSON for this request: {str(e)[:300]}")
-            except Exception as e:  # noqa: BLE001
-                log.warning(f"{name}" + (f" model {model}" if model else "") +
-                            f": failed after retries: {str(e)[:300]}")
+        def retryable(error):
+            if isinstance(error, (ValidationError, ValueError)):
+                return False
+            status = getattr(error, "status_code", getattr(error, "code", None))
+            return status not in (400, 401, 403, 404, 422, "model_not_found")
 
-            if model and index + 1 < len(models):
-                log.info(f"Gemini model switch: {model} -> {models[index + 1]}")
-        if name == "gemini":
-            log.warning("all configured Gemini models failed; continuing to the next provider or heuristic fallback")
+        try:
+            result = retry(call, attempts=3, log=log, what=f"{what} via {label}", retry_if=retryable)
+            log.info(f"{what}: answered by {label}")
+            return result, label
+        except ImportError as e:
+            log.warning(f"{label}: library not installed ({e})")
+        except (ValidationError, ValueError) as e:
+            log.warning(f"{label}: reply was not valid JSON for this request: {str(e)[:300]}")
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"{label}: failed after retries: {str(e)[:300]}")
     raise AIUnavailable(f"no AI provider could answer ({what})")

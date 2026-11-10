@@ -57,7 +57,7 @@ def banner(s, vid, account, log_file):
     t.add_row("Video", watch_url(vid))
     t.add_row("YT account", account or "-")
     t.add_row("Clips", f"{s.clips} x {s.min_sec:.0f}-{s.max_sec:.0f}s, layout {s.layout}")
-    t.add_row("AI", f"{s.ai} (claude: {s.claude_model} -> gemini: {s.gemini_model})")
+    t.add_row("AI", f"{s.ai} ({len(s.ai_model_hierarchy)} ranked models)")
     t.add_row("Whisper", f"{s.whisper_model} on {s.whisper_device}")
     t.add_row("Upload", f"ON ({s.privacy})" if s.upload else "OFF (use --upload to enable)")
     t.add_row("Output", str(s.out / vid))
