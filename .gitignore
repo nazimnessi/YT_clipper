@@ -1,0 +1,8 @@
+data/
+logs/
+models/
+.env
+client_secret.json
+token.json
+__pycache__/
+.venv/

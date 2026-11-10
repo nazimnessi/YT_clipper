@@ -1,0 +1,60 @@
+# Settings. Command-line options override these (python main.py --help).
+# API keys do NOT go here - put them in .env
+
+input:
+  excel: input_video.xlsx # optional: columns video_url | yt_account
+
+clips:
+  clips: 3 # how many clips to make
+  min_sec: 20
+  max_sec: 59
+  layout: auto # auto | single | stacked | wide
+  pad_sec: 3 # extra seconds downloaded around each clip
+
+ai:
+  ai: auto # auto (Claude -> Gemini -> heuristic) | claude | gemini | heuristic
+  claude_model: claude-sonnet-5-5
+  gemini_model: gemini-3.8-flash
+  gemini_fallback_models:
+    - gemini-4-carbon
+    - gemini-4-argon
+    - gemini-3.6-flash
+    - gemini-3.5-flash-lite
+    - gemini-3.1-flash-lite
+    - gemini-3-flash-preview
+    - gemini-3.1-pro-preview
+    - gemini-2.5-flash-lite
+
+transcription:
+  whisper_model: small # tiny | base | small | medium | large-v3  (bigger = better, slower)
+  whisper_device: auto # auto | cpu | cuda
+  language: # e.g. en, hi, ml - empty = detect automatically
+
+render:
+  hook_title: true # show the clip title at the top for the first seconds
+  hook_seconds: 2.5
+  loudnorm: true # even out volume
+  crf: 20 # video quality (lower = better/bigger, 18-23 is sensible)
+
+subtitles:
+  font: Arial
+  font_size: 80
+  words_per_line: 3
+  uppercase: true
+  text_color: "&H00FFFFFF" # ASS colours are &HAABBGGRR -> white
+  highlight_color: "&H0000FFFF" # yellow
+  outline: 6
+
+upload:
+  upload: false # OFF by default - use --upload to enable
+  privacy: private # private | unlisted | public
+  category_id: "22" # 22 = People & Blogs
+  client_secret: client_secret.json
+  token: token.json
+
+misc:
+  out: data
+  logs: logs
+  models_dir: models
+  cookies_from_browser: # chrome | edge | firefox - use if YouTube says "sign in to confirm you're not a bot"
+  insecure: false # true = skip SSL certificate checks (company network workaround)

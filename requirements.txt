@@ -1,0 +1,15 @@
+yt-dlp[default]
+faster-whisper
+av<19
+anthropic
+google-genai
+opencv-python
+numpy
+rich
+openpyxl
+pydantic>=2
+python-dotenv
+PyYAML
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
