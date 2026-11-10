@@ -8,7 +8,7 @@ clips:
   clips: 3 # how many clips to make
   min_sec: 20
   max_sec: 59
-  layout: auto # auto | single | stacked | wide
+  layout: auto # auto selects a video-type layout; single | stacked | wide keep legacy framing
   pad_sec: 3 # extra seconds downloaded around each clip
 
 ai:

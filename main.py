@@ -135,7 +135,10 @@ def main():
                 meta = job.clip_meta(n)
                 fr = job.load(f"clip_{n}", "frame.json", default={})
                 rec.update(length=meta.get("final_duration") or meta.get("duration") or 0,
-                           layout="+".join(sorted({sg["layout"] for sg in fr.get("segments", [])})) or "-",
+                           layout="+".join(sorted({
+                               sg.get("composition", {}).get("layout", sg["layout"])
+                               for sg in fr.get("segments", [])
+                           })) or "-",
                            output=meta.get("output"), url=meta.get("url"))
                 if rec["status"] == "ok" and not s.upload:
                     rec["status"] = "ok (not uploaded)"

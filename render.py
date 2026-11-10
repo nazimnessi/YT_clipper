@@ -101,6 +101,32 @@ def _crop(c) -> str:
 def layout_filter(i: int, sg: dict, t0: float) -> str:
     a, b = t0 + sg["start"], t0 + sg["end"]
     head = f"[v{i}]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS"
+    composition = sg.get("composition")
+    if composition:
+        regions = composition["regions"]
+        branches = (f"{head},split={len(regions)}" +
+                    "".join(f"[r{i}_{j}]" for j in range(len(regions))) + ";")
+        base = f"color=c=black:s={W_OUT}x{H_OUT}:r=30:d={b - a:.3f}[canvas{i}]"
+        parts = [branches, base]
+        current = f"[canvas{i}]"
+        for j, region in enumerate(regions):
+            x, y, cw, ch = region["crop"]
+            rx = round(region["x"] * W_OUT)
+            ry = round(region["y"] * H_OUT)
+            rw = max(2, round(region["width"] * W_OUT / 2) * 2)
+            rh = max(2, round(region["height"] * H_OUT / 2) * 2)
+            parts.append(
+                f"[r{i}_{j}]crop={cw}:{ch}:{x}:{y},"
+                f"scale={rw}:{rh}:force_original_aspect_ratio=increase,"
+                f"crop={rw}:{rh},setsar=1[region{i}_{j}]"
+            )
+            target = f"[composed{i}_{j}]"
+            parts.append(
+                f"{current}[region{i}_{j}]overlay={rx}:{ry}:shortest=1{target}"
+            )
+            current = target
+        parts.append(f"{current}format=yuv420p[s{i}]")
+        return ";".join(parts)
     lay = sg["layout"]
     if lay == "single":
         return f"{head},{_crop(sg['crops'][0])},scale={W_OUT}:{H_OUT},setsar=1,format=yuv420p[s{i}]"
@@ -145,11 +171,12 @@ def run(job, clip: dict):
     key = f"clip_{n}.render"
     cdir = job.clip_dir(n)
     final = cdir / "final.mp4"
-    if job.should_skip(key) and final.exists():
+    meta = job.clip_meta(n)
+    if (job.should_skip(key) and final.exists()
+            and meta.get("render_layout_mode") == s.layout):
         log.info(f"clip {n}: already rendered - skipping")
         with job.pipe.step("render", f"clip {n} (cached)"):
             return
-    meta = job.clip_meta(n)
     frame = job.load(f"clip_{n}", "frame.json")
     t0, t1 = meta["trim_start"], meta["trim_end"]
     duration = t1 - t0
@@ -174,7 +201,8 @@ def run(job, clip: dict):
     copy_dir.mkdir(exist_ok=True)
     nice = copy_dir / f"{n:02d}_{safe_name(clip['title'])}.mp4"
     shutil.copyfile(final, nice)
-    job.update_clip_meta(n, final=str(final), output=str(nice), final_duration=round(out["duration"], 2))
+    job.update_clip_meta(n, final=str(final), output=str(nice), final_duration=round(out["duration"], 2),
+                         render_layout_mode=s.layout)
     log.info(f"clip {n}: rendered {out['width']}x{out['height']}, {out['duration']:.1f}s, "
              f"{final.stat().st_size / 1e6:.1f} MB -> {nice}")
     job.state.mark(key)

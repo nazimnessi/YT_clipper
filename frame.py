@@ -18,6 +18,7 @@ import cv2
 
 from utils import log as logs
 from utils.faces import FaceDetector
+from utils import video_layout as video_layouts
 
 log = logs.get("frame")
 SAMPLE_FPS = 4          # frames per second examined for scene cuts
@@ -128,6 +129,42 @@ def build_segments(shots, W, H, forced, detector_ok) -> list[dict]:
     return segs
 
 
+def build_video_segments(shots, W, H, video_type, detector_ok) -> list[dict]:
+    """Build per-shot normalized compositions, independently cropping each detected element."""
+    segs = []
+    for start, end, samples in shots:
+        faces = video_layouts.face_elements(samples, H) if detector_ok else []
+        layout_name = video_layouts.choose_layout(video_type, len(faces))
+        selected_type = video_type
+        if layout_name is None:
+            selected_type = "general"
+            layout_name = video_layouts.LAYOUTS["general"]["default_layout"]
+        regions = video_layouts.compose_regions(selected_type, layout_name, faces, W, H)
+        if regions is None:
+            selected_type = "general"
+            layout_name = video_layouts.LAYOUTS["general"]["default_layout"]
+            regions = video_layouts.compose_regions(selected_type, layout_name, faces, W, H)
+
+        conventional_layout = (
+            "stacked" if layout_name in {
+                "two_person_vertical", "interviewer_guest", "reaction_vertical",
+                "presenter_screen", "gameplay_facecam",
+            } else "single"
+        )
+        segs.append({
+            "start": start,
+            "end": end,
+            "layout": conventional_layout,
+            "crops": [],
+            "composition": {
+                "video_type": selected_type,
+                "layout": layout_name,
+                "regions": regions,
+            },
+        })
+    return segs
+
+
 # ---------------------------------------------------------------- video analysis
 def analyse(path, t0, t1, detector: FaceDetector, step=None):
     """Return (W, H, shots) where shots = [(start, end, [faces per sample])], times relative to t0."""
@@ -175,23 +212,44 @@ def analyse(path, t0, t1, detector: FaceDetector, step=None):
 def run(job, clip: dict):
     s, n = job.settings, clip["index"]
     key = f"clip_{n}.frame"
-    if job.should_skip(key):
+    video_layout_path = job.clip_dir(n) / "video_layout.json"
+    if job.should_skip(key) and (s.layout != "auto" or video_layout_path.exists()):
         log.info(f"clip {n}: framing already decided - skipping")
         with job.pipe.step("frame", f"clip {n} (cached)"):
             return
     meta = job.clip_meta(n)
+    video_info = job.load("info.json", default={})
+    video_type = video_layouts.classify_video(video_info)
     with job.pipe.step("frame", f"clip {n}") as step:
         detector = FaceDetector(s.models_dir)
         W, H, shots = analyse(job.clip_dir(n) / "source.mp4", meta["trim_start"], meta["trim_end"], detector, step)
-        segs = build_segments(shots, W, H, s.layout, detector.available)
+        if s.layout == "auto":
+            segs = build_video_segments(shots, W, H, video_type, detector.available)
+        else:
+            segs = build_segments(shots, W, H, s.layout, detector.available)
         if segs:
             segs[-1]["end"] = round(meta["trim_end"] - meta["trim_start"], 2)
-    job.save({"width": W, "height": H, "segments": segs}, f"clip_{n}", "frame.json")
-    summary = Counter(sg["layout"] for sg in segs)
+    job.save({"width": W, "height": H, "video_type": video_type, "segments": segs},
+             f"clip_{n}", "frame.json")
+    if s.layout == "auto":
+        schema = {
+            "default_layout": video_layouts.LAYOUTS[video_type]["default_layout"],
+            "layouts": dict(video_layouts.LAYOUTS[video_type]["layouts"]),
+            "segments": [
+                {"start": sg["start"], "end": sg["end"], **sg["composition"]}
+                for sg in segs
+            ],
+        }
+        schema["layouts"].setdefault(
+            "smart_crop", video_layouts.LAYOUTS["general"]["layouts"]["smart_crop"])
+        job.save({video_type: schema}, f"clip_{n}", "video_layout.json")
+    summary = Counter(sg.get("composition", {}).get("layout", sg["layout"]) for sg in segs)
     log.info(f"clip {n}: {len(shots)} shots -> {len(segs)} segments " +
              ", ".join(f"{k}x{v}" for k, v in summary.items()))
     for sg in segs:
-        log.debug(f"  {sg['start']:6.2f}-{sg['end']:6.2f}s {sg['layout']:<8} {sg['crops']}")
+        name = sg.get("composition", {}).get("layout", sg["layout"])
+        regions = sg.get("composition", {}).get("regions", sg["crops"])
+        log.debug(f"  {sg['start']:6.2f}-{sg['end']:6.2f}s {name:<24} {regions}")
     job.state.mark(key, layouts=dict(summary))
 
 

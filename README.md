@@ -12,8 +12,8 @@ ingest → highlight → for each clip: fetch → transcribe → frame → rende
 | highlight | `highlight.py` | Picks the best moments using a ranked Claude, Gemini, and Groq model chain, then a free heuristic. |
 | fetch | `fetch.py` | Downloads only each clip's time range. |
 | transcribe | `transcribe.py` | Whisper gives exact word timings, then each clip's start and end are moved onto natural pauses. |
-| frame | `frame.py` | Finds shot changes and faces, then picks **single** (one face), **stacked** (two people, one on top of the other) or **wide** (whole frame) for each shot. |
-| render | `render.py` | Crops or stacks each shot, adds karaoke subtitles and a hook title, and evens out the volume. |
+| frame | `frame.py` | Finds shot changes and faces, classifies the video from its YouTube title/description/tags, then builds per-shot regions for its video type. |
+| render | `render.py` | Independently crops each region from the source video, adds karaoke subtitles and a hook title, and evens out the volume. |
 | publish | `publish.py` | Uploads to YouTube. Off unless you pass `--upload`. |
 
 ---
@@ -86,7 +86,7 @@ If you don't give `--url`, the script uses the **first row of `input_video.xlsx`
 | `--excel` | `input_video.xlsx` | input Excel file |
 | `--clips` | 3 | number of clips |
 | `--min-sec` / `--max-sec` | 20 / 59 | allowed clip length |
-| `--layout` | auto | `auto` / `single` / `stacked` / `wide` (use `stacked` to force two people top and bottom) |
+| `--layout` | auto | `auto` selects a video-type layout; `single` / `stacked` / `wide` preserve legacy framing overrides |
 | `--ai` | auto | `auto` (ranked Claude, Gemini, and Groq models, then heuristic) / `claude` / `gemini` / `groq` / `heuristic` |
 | `--whisper-model` | small | `tiny` / `base` / `small` / `medium` / `large-v3` |
 | `--whisper-device` | auto | `auto` / `cpu` / `cuda` |
@@ -101,6 +101,16 @@ If you don't give `--url`, the script uses the **first row of `input_video.xlsx`
 | `--config` | config.yaml | settings file |
 
 Command-line options override `config.yaml`, which overrides the built-in defaults.
+With `layout: auto`, the clipper matches YouTube title, description, and tags to
+podcast, gaming, reaction, tutorial, interview, single-person, or presentation
+layouts. Ambiguous metadata uses the general smart crop. Regions such as two
+speakers or a facecam are cropped independently from the same input video. If a
+required face is missing, the shot uses an available full-screen variant or the
+general smart crop.
+Each clip stores the selected per-shot layout and normalized regions in
+`clip_N/video_layout.json`. Setting `--layout single`, `stacked`, or `wide`
+keeps the previous framing behavior.
+
 `config.yaml` contains the mixed-provider `ai_model_hierarchy`, ordered for
 quality first. The app skips providers without keys and tries each remaining
 model in sequence before falling back to the heuristic picker. Edit the list to
@@ -133,7 +143,7 @@ data/<video_id>/
   info.json captions.json heatmap.json comments.json
   highlights.json                    <- chosen clips, scores, which AI picked them
   results.json   run.log   state.json
-  clip_1/ source.mp4 words.json clip.json frame.json subs.ass filter.txt final.mp4
+  clip_1/ source.mp4 words.json clip.json frame.json video_layout.json subs.ass filter.txt final.mp4
 logs/run_YYYYMMDD_HHMMSS.log         <- full debug log for each run
 ```
 
