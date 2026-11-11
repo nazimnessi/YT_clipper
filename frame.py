@@ -85,9 +85,11 @@ def decide(samples: list[list], W: int, H: int, forced: str = "auto", detector_o
         cs = [_centre(max(f, key=lambda z: z[2] * z[3]))[0] for f in faces if f]
         return statistics.median(cs) if cs else W / 2
 
-    if forced == "wide" or vertical_source:
-        return {"layout": "wide", "crops": []}
+    if forced in ("wide", "stacked", "single") and vertical_source:
+        log.warning(f"forced {forced} layout on a vertical source")
 
+    if forced == "wide":
+        return {"layout": "wide", "crops": []}
     if forced == "stacked":
         tp = two_people()
         if tp:
@@ -99,6 +101,8 @@ def decide(samples: list[list], W: int, H: int, forced: str = "auto", detector_o
         return {"layout": "single", "crops": [single_crop(one_person_cx(), W, H)]}
 
     # auto
+    if vertical_source:
+        return {"layout": "wide", "crops": []}
     if not detector_ok or n == 0 or n >= 3:
         return {"layout": "wide", "crops": []}
     if n == 1:
@@ -133,7 +137,7 @@ def build_video_segments(shots, W, H, video_type, detector_ok) -> list[dict]:
     """Build per-shot normalized compositions, independently cropping each detected element."""
     segs = []
     for start, end, samples in shots:
-        faces = video_layouts.face_elements(samples, H) if detector_ok else []
+        faces = video_layouts.face_elements(samples, H, W) if detector_ok else []
         layout_name = video_layouts.choose_layout(video_type, len(faces))
         selected_type = video_type
         if layout_name is None:
@@ -144,6 +148,16 @@ def build_video_segments(shots, W, H, video_type, detector_ok) -> list[dict]:
             selected_type = "general"
             layout_name = video_layouts.LAYOUTS["general"]["default_layout"]
             regions = video_layouts.compose_regions(selected_type, layout_name, faces, W, H)
+        if regions is None:
+            regions = [{
+                "source": "main_video",
+                "x": 0,
+                "y": 0,
+                "width": 1,
+                "height": 1,
+                "crop": video_layouts._cover_crop(W, H, 1080 / 1920),
+                "element_id": "main_video",
+            }]
 
         conventional_layout = (
             "stacked" if layout_name in {
@@ -151,18 +165,41 @@ def build_video_segments(shots, W, H, video_type, detector_ok) -> list[dict]:
                 "presenter_screen", "gameplay_facecam",
             } else "single"
         )
-        segs.append({
+        composition = {
+            "video_type": selected_type,
+            "layout": layout_name,
+            "regions": regions,
+        }
+        if segs and end - start < MIN_SHOT:
+            previous = segs[-1]
+            conventional_layout = previous["layout"]
+            composition = previous["composition"]
+        current = {
             "start": start,
             "end": end,
             "layout": conventional_layout,
             "crops": [],
-            "composition": {
-                "video_type": selected_type,
-                "layout": layout_name,
-                "regions": regions,
-            },
-        })
+            "composition": composition,
+        }
+        if segs and _similar_composition(segs[-1], current, W):
+            segs[-1]["end"] = end
+        else:
+            segs.append(current)
     return segs
+
+
+def _similar_composition(a: dict, b: dict, W: int) -> bool:
+    first, second = a["composition"], b["composition"]
+    if first["layout"] != second["layout"]:
+        return False
+    regions_a, regions_b = first["regions"], second["regions"]
+    if len(regions_a) != len(regions_b):
+        return False
+    return all(
+        abs(region_a["crop"][axis] - region_b["crop"][axis]) < 0.04 * W
+        for region_a, region_b in zip(regions_a, regions_b)
+        for axis in (0, 1)
+    )
 
 
 # ---------------------------------------------------------------- video analysis

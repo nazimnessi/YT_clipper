@@ -4,7 +4,7 @@
   -> pass 1: AI proposes ~12 candidates
   -> pass 2: AI scores each (hook, payoff, standalone, emotion) and writes a title
   -> keep the top N, non-overlapping
-  AI chain: Claude -> Gemini -> heuristic (heatmap + comments + speech density)
+  AI chain: configured hierarchy (Claude / Gemini / Groq) -> heuristic
 
 Output: highlights.json  [{index, start, end, title, score, reason, picked_by}]
 """
@@ -263,8 +263,8 @@ def run(job) -> list[dict]:
         if s.ai != "heuristic":
             try:
                 cands = ai_pick(info, segs, heatmap, ctimes, s)
-            except AIUnavailable as e:
-                log.warning(f"{e} - using heuristic picker")
+            except Exception as e:  # noqa: BLE001 - AI failures should not stop heuristic selection
+                log.warning(f"{type(e).__name__}: {e} - using heuristic picker")
         step.update(completed=2, label="selecting")
         clips = fit_and_dedupe(cands, segs, duration, s, s.clips) if cands else []
         if len(clips) < s.clips:

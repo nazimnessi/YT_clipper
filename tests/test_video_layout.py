@@ -5,6 +5,7 @@ from utils.video_layout import (
     choose_layout,
     classify_video,
     compose_regions,
+    face_elements,
 )
 
 
@@ -33,6 +34,22 @@ class VideoLayoutTests(unittest.TestCase):
             self.assertGreater(height, 0)
             self.assertLessEqual(x + width, 1280)
             self.assertLessEqual(y + height, 720)
+
+    def test_face_tracks_do_not_swap_when_one_face_is_missing(self):
+        person_a = (100, 100, 80, 120, 0.9)
+        person_b = (700, 100, 80, 120, 0.9)
+        samples = [
+            [person_a, person_b],
+            [person_b],
+            [person_a, person_b],
+            [person_b],
+        ]
+
+        elements = face_elements(samples, 720, 1280)
+
+        self.assertEqual(len(elements), 2)
+        self.assertAlmostEqual(elements[0][0], 100)
+        self.assertAlmostEqual(elements[1][0], 700)
 
     def test_missing_face_requests_fallback_and_all_templates_are_selectable(self):
         self.assertIsNone(compose_regions("podcast", "two_person_vertical", [(10, 10, 20, 20)], 640, 360))

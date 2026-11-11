@@ -81,7 +81,12 @@ def extract_json(text: str):
 def ask_json(prompt: str, schema, s, log, what: str = "AI request", max_tokens: int = 4096):
     """Try configured models in ranked order. Returns (parsed, provider:model)."""
     adapter = TypeAdapter(schema)
-    models = model_chain(s)
+    if s.ai not in {"claude", "gemini", "groq", "auto", "heuristic"}:
+        raise AIUnavailable(f"unsupported AI mode: {s.ai!r}")
+    try:
+        models = model_chain(s)
+    except ValueError as e:
+        raise AIUnavailable(f"invalid AI model hierarchy: {e}") from e
     missing_keys = set()
     for index, (name, model) in enumerate(models):
         fn, has_key = PROVIDERS[name]
@@ -100,7 +105,7 @@ def ask_json(prompt: str, schema, s, log, what: str = "AI request", max_tokens: 
             return adapter.validate_python(extract_json(text))
 
         def retryable(error):
-            if isinstance(error, (ValidationError, ValueError)):
+            if isinstance(error, (ImportError, ValidationError, ValueError)):
                 return False
             status = getattr(error, "status_code", getattr(error, "code", None))
             return status not in (400, 401, 403, 404, 422, "model_not_found")
