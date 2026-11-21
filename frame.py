@@ -11,6 +11,7 @@ Output: clip_N/frame.json {width, height, segments:[{start, end, layout, crops:[
 """
 from __future__ import annotations
 
+import os
 import statistics
 from collections import Counter
 
@@ -27,6 +28,18 @@ CUT_THRESHOLD = 0.45    # histogram distance that counts as a shot change
 MIN_SHOT = 1.2          # shots shorter than this inherit the previous layout
 MIN_FACE_H = 0.07       # ignore faces smaller than 7% of frame height
 STACK_ASPECT = 1080 / 960
+
+
+def _suggested_layout_enabled() -> bool:
+    value = os.getenv("USE_SUGGESTED_VIDEO_LAYOUT", "true").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        "USE_SUGGESTED_VIDEO_LAYOUT must be a boolean "
+        "(true/false, yes/no, on/off, or 1/0)"
+    )
 
 
 def _even(v) -> int:
@@ -85,9 +98,11 @@ def decide(samples: list[list], W: int, H: int, forced: str = "auto", detector_o
         cs = [_centre(max(f, key=lambda z: z[2] * z[3]))[0] for f in faces if f]
         return statistics.median(cs) if cs else W / 2
 
-    if forced == "wide" or vertical_source:
-        return {"layout": "wide", "crops": []}
+    if forced in ("wide", "stacked", "single") and vertical_source:
+        log.warning(f"forced {forced} layout on a vertical source")
 
+    if forced == "wide":
+        return {"layout": "wide", "crops": []}
     if forced == "stacked":
         tp = two_people()
         if tp:
@@ -99,6 +114,8 @@ def decide(samples: list[list], W: int, H: int, forced: str = "auto", detector_o
         return {"layout": "single", "crops": [single_crop(one_person_cx(), W, H)]}
 
     # auto
+    if vertical_source:
+        return {"layout": "wide", "crops": []}
     if not detector_ok or n == 0 or n >= 3:
         return {"layout": "wide", "crops": []}
     if n == 1:
@@ -133,7 +150,7 @@ def build_video_segments(shots, W, H, video_type, detector_ok) -> list[dict]:
     """Build per-shot normalized compositions, independently cropping each detected element."""
     segs = []
     for start, end, samples in shots:
-        faces = video_layouts.face_elements(samples, H) if detector_ok else []
+        faces = video_layouts.face_elements(samples, H, W) if detector_ok else []
         layout_name = video_layouts.choose_layout(video_type, len(faces))
         selected_type = video_type
         if layout_name is None:
@@ -144,6 +161,16 @@ def build_video_segments(shots, W, H, video_type, detector_ok) -> list[dict]:
             selected_type = "general"
             layout_name = video_layouts.LAYOUTS["general"]["default_layout"]
             regions = video_layouts.compose_regions(selected_type, layout_name, faces, W, H)
+        if regions is None:
+            regions = [{
+                "source": "main_video",
+                "x": 0,
+                "y": 0,
+                "width": 1,
+                "height": 1,
+                "crop": video_layouts._cover_crop(W, H, 1080 / 1920),
+                "element_id": "main_video",
+            }]
 
         conventional_layout = (
             "stacked" if layout_name in {
@@ -151,18 +178,47 @@ def build_video_segments(shots, W, H, video_type, detector_ok) -> list[dict]:
                 "presenter_screen", "gameplay_facecam",
             } else "single"
         )
-        segs.append({
+        composition = {
+            "video_type": selected_type,
+            "layout": layout_name,
+            "regions": regions,
+        }
+        if segs and end - start < MIN_SHOT:
+            previous = segs[-1]
+            conventional_layout = previous["layout"]
+            composition = previous["composition"]
+        current = {
             "start": start,
             "end": end,
             "layout": conventional_layout,
             "crops": [],
-            "composition": {
-                "video_type": selected_type,
-                "layout": layout_name,
-                "regions": regions,
-            },
-        })
+            "composition": composition,
+        }
+        if segs and _similar_composition(segs[-1], current, W):
+            segs[-1]["end"] = end
+        else:
+            segs.append(current)
     return segs
+
+
+def build_auto_segments(shots, W, H, video_type, detector_ok, suggested_layouts=True) -> list[dict]:
+    if suggested_layouts:
+        return build_video_segments(shots, W, H, video_type, detector_ok)
+    return build_segments(shots, W, H, "auto", detector_ok)
+
+
+def _similar_composition(a: dict, b: dict, W: int) -> bool:
+    first, second = a["composition"], b["composition"]
+    if first["layout"] != second["layout"]:
+        return False
+    regions_a, regions_b = first["regions"], second["regions"]
+    if len(regions_a) != len(regions_b):
+        return False
+    return all(
+        abs(region_a["crop"][axis] - region_b["crop"][axis]) < 0.04 * W
+        for region_a, region_b in zip(regions_a, regions_b)
+        for axis in (0, 1)
+    )
 
 
 # ---------------------------------------------------------------- video analysis
@@ -213,10 +269,18 @@ def run(job, clip: dict):
     s, n = job.settings, clip["index"]
     key = f"clip_{n}.frame"
     video_layout_path = job.clip_dir(n) / "video_layout.json"
-    if job.should_skip(key) and (s.layout != "auto" or video_layout_path.exists()):
-        log.info(f"clip {n}: framing already decided - skipping")
-        with job.pipe.step("frame", f"clip {n} (cached)"):
-            return
+    suggested_layouts = s.layout == "auto" and _suggested_layout_enabled()
+    if job.should_skip(key):
+        layout_mode_matches = s.layout != "auto"
+        if s.layout == "auto":
+            previous_frame = job.load(f"clip_{n}", "frame.json", default={})
+            layout_mode_matches = (
+                previous_frame.get("suggested_video_layout_enabled", True) == suggested_layouts
+            )
+        if layout_mode_matches and (not suggested_layouts or video_layout_path.exists()):
+            log.info(f"clip {n}: framing already decided - skipping")
+            with job.pipe.step("frame", f"clip {n} (cached)"):
+                return
     meta = job.clip_meta(n)
     video_info = job.load("info.json", default={})
     video_type = video_layouts.classify_video(video_info)
@@ -224,14 +288,25 @@ def run(job, clip: dict):
         detector = FaceDetector(s.models_dir)
         W, H, shots = analyse(job.clip_dir(n) / "source.mp4", meta["trim_start"], meta["trim_end"], detector, step)
         if s.layout == "auto":
-            segs = build_video_segments(shots, W, H, video_type, detector.available)
+            segs = build_auto_segments(
+                shots, W, H, video_type, detector.available, suggested_layouts
+            )
         else:
             segs = build_segments(shots, W, H, s.layout, detector.available)
         if segs:
             segs[-1]["end"] = round(meta["trim_end"] - meta["trim_start"], 2)
-    job.save({"width": W, "height": H, "video_type": video_type, "segments": segs},
-             f"clip_{n}", "frame.json")
-    if s.layout == "auto":
+    job.save(
+        {
+            "width": W,
+            "height": H,
+            "video_type": video_type,
+            "suggested_video_layout_enabled": suggested_layouts,
+            "segments": segs,
+        },
+        f"clip_{n}",
+        "frame.json",
+    )
+    if suggested_layouts:
         schema = {
             "default_layout": video_layouts.LAYOUTS[video_type]["default_layout"],
             "layouts": dict(video_layouts.LAYOUTS[video_type]["layouts"]),
@@ -243,6 +318,8 @@ def run(job, clip: dict):
         schema["layouts"].setdefault(
             "smart_crop", video_layouts.LAYOUTS["general"]["layouts"]["smart_crop"])
         job.save({video_type: schema}, f"clip_{n}", "video_layout.json")
+    elif video_layout_path.exists():
+        video_layout_path.unlink()
     summary = Counter(sg.get("composition", {}).get("layout", sg["layout"]) for sg in segs)
     log.info(f"clip {n}: {len(shots)} shots -> {len(segs)} segments " +
              ", ".join(f"{k}x{v}" for k, v in summary.items()))

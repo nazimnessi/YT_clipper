@@ -65,6 +65,10 @@ def banner(s, vid, account, log_file):
     console.print(Panel(t, title="YouTube Clipper", expand=False))
 
 
+def first_line(e: Exception) -> str:
+    return (str(e).splitlines() or [type(e).__name__])[0]
+
+
 def summary(job, results, timings, started):
     t = Table(title="Result", show_lines=False)
     for col in ("#", "Title", "Length", "Layout", "Picked by", "Status", "File / URL"):
@@ -99,6 +103,10 @@ def main():
     timings = defaultdict(float)
     results = []
 
+    def save_results():
+        job.save({"video": url, "video_id": vid, "yt_account": account, "upload": s.upload,
+                  "clips": results, "timings": dict(timings)}, "results.json")
+
     def timed(name, fn, *a):
         t = time.time()
         try:
@@ -111,6 +119,12 @@ def main():
             job.pipe = pipe
             timed("ingest", ingest.run, job)
             clips = timed("highlight", highlight.run, job)
+            if not clips:
+                message = "No clips were selected: no usable highlights matched the configured clip length."
+                log.error(message)
+                console.print(f"[red]{message}[/]")
+                save_results()
+                sys.exit(2)
             pipe.set_total(total_weight(len(clips), s.upload))
 
             for clip in clips:
@@ -125,10 +139,10 @@ def main():
                     except KeyboardInterrupt:
                         raise
                     except Exception as e:  # noqa: BLE001 - one bad clip shouldn't stop the others
-                        log.error(f"clip {n}: {name} failed: {str(e).splitlines()[0][:300]}")
+                        log.error(f"clip {n}: {name} failed: {first_line(e)[:300]}")
                         log.debug(traceback.format_exc())
                         job.state.mark(f"clip_{n}.{name}", status="failed", error=str(e)[:500])
-                        rec.update(status=f"failed at {name}", error=str(e).splitlines()[0][:200])
+                        rec.update(status=f"failed at {name}", error=first_line(e)[:200])
                         rest = [x for x, _ in CLIP_STEPS[i + 1:] if x != "publish" or s.upload]
                         pipe.done += sum(WEIGHTS[x] for x in rest)   # keep the ETA honest
                         break
@@ -136,13 +150,14 @@ def main():
                 fr = job.load(f"clip_{n}", "frame.json", default={})
                 rec.update(length=meta.get("final_duration") or meta.get("duration") or 0,
                            layout="+".join(sorted({
-                               sg.get("composition", {}).get("layout", sg["layout"])
+                               sg.get("composition", {}).get("layout") or sg.get("layout", "?")
                                for sg in fr.get("segments", [])
                            })) or "-",
                            output=meta.get("output"), url=meta.get("url"))
                 if rec["status"] == "ok" and not s.upload:
                     rec["status"] = "ok (not uploaded)"
                 results.append(rec)
+                save_results()
     except KeyboardInterrupt:
         log.warning("stopped by user - run the same command again to resume")
         sys.exit(130)
@@ -156,8 +171,7 @@ def main():
     finally:
         logs.remove_handler(vlog)
 
-    job.save({"video": url, "video_id": vid, "yt_account": account, "upload": s.upload,
-              "clips": results, "timings": dict(timings)}, "results.json")
+    save_results()
     summary(job, results, timings, started)
     ok = sum(r["status"].startswith("ok") for r in results)
     log.info(f"finished: {ok}/{len(results)} clips ok")

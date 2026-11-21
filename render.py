@@ -7,6 +7,8 @@ Output: clip_N/final.mp4  (+ a copy in data/<video>/output/ with a readable name
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import shutil
 
@@ -19,10 +21,11 @@ W_OUT, H_OUT = 1080, 1920
 
 # ---------------------------------------------------------------- subtitles (.ass)
 def _ts(t: float) -> str:
-    t = max(t, 0)
-    h, rem = divmod(t, 3600)
-    m, sec = divmod(rem, 60)
-    return f"{int(h)}:{int(m):02d}:{sec:05.2f}"
+    cs = round(max(t, 0) * 100)
+    h, cs = divmod(cs, 360000)
+    m, cs = divmod(cs, 6000)
+    sec, cs = divmod(cs, 100)
+    return f"{h}:{m:02d}:{sec:02d}.{cs:02d}"
 
 
 def _esc(t: str) -> str:
@@ -98,19 +101,39 @@ def _crop(c) -> str:
     return f"crop={w}:{h}:{x}:{y}"
 
 
-def layout_filter(i: int, sg: dict, t0: float) -> str:
+def _even_crop(crop, source_width: int | None, source_height: int | None):
+    x, y, w, h = crop
+
+    def even(value):
+        return max(2, int(round(value / 2)) * 2)
+
+    w, h = even(w), even(h)
+    if source_width:
+        w = min(w, max(2, source_width // 2 * 2))
+    if source_height:
+        h = min(h, max(2, source_height // 2 * 2))
+    x, y = max(0, int(round(x / 2)) * 2), max(0, int(round(y / 2)) * 2)
+    if source_width:
+        x = min(x, max(0, (source_width - w) // 2 * 2))
+    if source_height:
+        y = min(y, max(0, (source_height - h) // 2 * 2))
+    return x, y, w, h
+
+
+def layout_filter(i: int, sg: dict, t0: float, source_width: int | None = None,
+                  source_height: int | None = None) -> str:
     a, b = t0 + sg["start"], t0 + sg["end"]
     head = f"[v{i}]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS"
     composition = sg.get("composition")
     if composition:
         regions = composition["regions"]
         branches = (f"{head},split={len(regions)}" +
-                    "".join(f"[r{i}_{j}]" for j in range(len(regions))) + ";")
+                    "".join(f"[r{i}_{j}]" for j in range(len(regions))))
         base = f"color=c=black:s={W_OUT}x{H_OUT}:r=30:d={b - a:.3f}[canvas{i}]"
         parts = [branches, base]
         current = f"[canvas{i}]"
         for j, region in enumerate(regions):
-            x, y, cw, ch = region["crop"]
+            x, y, cw, ch = _even_crop(region["crop"], source_width, source_height)
             rx = round(region["x"] * W_OUT)
             ry = round(region["y"] * H_OUT)
             rw = max(2, round(region["width"] * W_OUT / 2) * 2)
@@ -145,10 +168,12 @@ def layout_filter(i: int, sg: dict, t0: float) -> str:
             f"[bgb{i}][fgs{i}]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[s{i}]")
 
 
-def build_filter(segments, t0, t1, has_audio: bool, loudnorm: bool, ass_name: str | None) -> str:
+def build_filter(segments, t0, t1, has_audio: bool, loudnorm: bool, ass_name: str | None,
+                 source_width: int | None = None, source_height: int | None = None) -> str:
     k = len(segments)
     parts = [f"[0:v]split={k}" + "".join(f"[v{i}]" for i in range(k)) if k > 1 else "[0:v]null[v0]"]
-    parts += [layout_filter(i, sg, t0) for i, sg in enumerate(segments)]
+    parts += [layout_filter(i, sg, t0, source_width, source_height)
+              for i, sg in enumerate(segments)]
     tail = "".join(f"[s{i}]" for i in range(k)) + f"concat=n={k}:v=1:a=0,fps=30"
     if ass_name:
         tail += f",ass={ass_name}"
@@ -166,32 +191,50 @@ def safe_name(title: str) -> str:
     return re.sub(r"\s+", "_", t)[:60] or "clip"
 
 
+def _render_key(frame: dict, clip: dict, s) -> str:
+    payload = {
+        "segments": frame.get("segments", []),
+        "subtitles": s.subtitles.model_dump(),
+        "crf": s.crf,
+        "loudnorm": s.loudnorm,
+        "hook_title": s.hook_title,
+        "hook_seconds": s.hook_seconds,
+        "title": clip.get("title") or "",
+        "layout": s.layout,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha1(encoded).hexdigest()
+
+
 def run(job, clip: dict):
     s, n = job.settings, clip["index"]
     key = f"clip_{n}.render"
     cdir = job.clip_dir(n)
     final = cdir / "final.mp4"
     meta = job.clip_meta(n)
+    frame = job.load(f"clip_{n}", "frame.json")
+    render_key = _render_key(frame, clip, s)
     if (job.should_skip(key) and final.exists()
-            and meta.get("render_layout_mode") == s.layout):
+            and meta.get("render_key") == render_key):
         log.info(f"clip {n}: already rendered - skipping")
         with job.pipe.step("render", f"clip {n} (cached)"):
             return
-    frame = job.load(f"clip_{n}", "frame.json")
     t0, t1 = meta["trim_start"], meta["trim_end"]
     duration = t1 - t0
     segments = frame["segments"] or [{"start": 0, "end": duration, "layout": "wide", "crops": []}]
     has_audio = ffmpeg.probe(cdir / "source.mp4")["has_audio"]
 
-    (cdir / "subs.ass").write_text(build_ass(meta.get("words", []), segments, clip["title"], s, duration),
+    title = clip.get("title") or ""
+    (cdir / "subs.ass").write_text(build_ass(meta.get("words", []), segments, title, s, duration),
                                    encoding="utf-8")
-    graph = build_filter(segments, t0, t1, has_audio, s.loudnorm, "subs.ass")
+    graph = build_filter(segments, t0, t1, has_audio, s.loudnorm, "subs.ass",
+                         frame.get("width"), frame.get("height"))
     (cdir / "filter.txt").write_text(graph, encoding="utf-8")   # for debugging
 
     args = ["-i", (cdir / "source.mp4").resolve(), "-filter_complex", graph, "-map", "[vout]"]
     if has_audio:
         args += ["-map", "[aout]", "-c:a", "aac", "-b:a", "160k"]
-    args += ["-c:v", "libx264", "-preset", "medium", "-crf", s.crf, "-pix_fmt", "yuv420p",
+    args += ["-c:v", "libx264", "-preset", "medium", "-crf", str(s.crf), "-pix_fmt", "yuv420p",
              "-movflags", "+faststart", "final.mp4"]
     with job.pipe.step("render", f"clip {n}") as step:
         ffmpeg.run(args, duration=duration, on_progress=lambda f: step.fraction(f, label=f"{f * 100:.0f}%"),
@@ -199,10 +242,10 @@ def run(job, clip: dict):
     out = ffmpeg.probe(final)
     copy_dir = job.path("output")
     copy_dir.mkdir(exist_ok=True)
-    nice = copy_dir / f"{n:02d}_{safe_name(clip['title'])}.mp4"
+    nice = copy_dir / f"{n:02d}_{safe_name(clip.get('title') or '')}.mp4"
     shutil.copyfile(final, nice)
     job.update_clip_meta(n, final=str(final), output=str(nice), final_duration=round(out["duration"], 2),
-                         render_layout_mode=s.layout)
+                         render_layout_mode=s.layout, render_key=render_key)
     log.info(f"clip {n}: rendered {out['width']}x{out['height']}, {out['duration']:.1f}s, "
              f"{final.stat().st_size / 1e6:.1f} MB -> {nice}")
     job.state.mark(key)

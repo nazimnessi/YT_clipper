@@ -151,20 +151,43 @@ def classify_video(info: dict) -> str:
     return winners[0] if len(winners) == 1 else "general"
 
 
-def face_elements(samples: list[list], height: int) -> list[tuple[float, float, float, float]]:
+def face_elements(samples: list[list], height: int, frame_width: int | None = None) -> list[tuple[float, float, float, float]]:
     """Return median face boxes ordered left-to-right across the shot."""
-    ordered = []
-    for sample in samples:
-        faces = [face for face in sample if face[3] >= 0.07 * height and face[4] >= 0.6]
-        ordered.append(sorted(faces, key=lambda face: face[0] + face[2] / 2))
-    count = max((len(sample) for sample in ordered), default=0)
-    elements = []
-    for index in range(count):
-        boxes = [sample[index] for sample in ordered if len(sample) > index]
-        if not boxes:
+    valid = [[face for face in sample if face[3] >= 0.07 * height and face[4] >= 0.6]
+             for sample in samples]
+    if not valid or not any(valid):
+        return []
+    seed = max(range(len(valid)), key=lambda index: len(valid[index]))
+    tracks = [[face] for face in valid[seed]]
+    max_distance = 0.25 * (frame_width or round(height * 16 / 9))
+
+    def centre(face):
+        return face[0] + face[2] / 2
+
+    for sample_index, faces in enumerate(valid):
+        if sample_index == seed:
             continue
-        elements.append(tuple(statistics.median(face[i] for face in boxes) for i in range(4)))
-    return elements
+        candidates = sorted(
+            (abs(centre(face) - statistics.median(centre(box) for box in track)),
+             track_index, face_index)
+            for track_index, track in enumerate(tracks)
+            for face_index, face in enumerate(faces)
+        )
+        assigned_tracks, assigned_faces = set(), set()
+        for distance, track_index, face_index in candidates:
+            if distance > max_distance:
+                break
+            if track_index in assigned_tracks or face_index in assigned_faces:
+                continue
+            tracks[track_index].append(faces[face_index])
+            assigned_tracks.add(track_index)
+            assigned_faces.add(face_index)
+
+    elements = [
+        tuple(statistics.median(face[i] for face in track) for i in range(4))
+        for track in tracks
+    ]
+    return sorted(elements, key=lambda face: face[0] + face[2] / 2)
 
 
 def _even(value: float) -> int:
