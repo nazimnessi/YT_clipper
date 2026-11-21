@@ -107,9 +107,13 @@ layouts. Ambiguous metadata uses the general smart crop. Regions such as two
 speakers or a facecam are cropped independently from the same input video. If a
 required face is missing, the shot uses an available full-screen variant or the
 general smart crop.
-Each clip stores the selected per-shot layout and normalized regions in
-`clip_N/video_layout.json`. Setting `--layout single`, `stacked`, or `wide`
-keeps the previous framing behavior.
+When suggested layouts are enabled, each clip stores the selected per-shot
+layout and normalized regions in `clip_N/video_layout.json`. Setting
+`--layout single`, `stacked`, or `wide` keeps the previous framing behavior.
+Set `USE_SUGGESTED_VIDEO_LAYOUT=false` in `.env` to disable video-type suggested
+layouts while keeping `--layout auto`; this uses the existing face-based auto
+framing instead. The setting defaults to `true`. Add `--force` when rerunning
+already processed clips so the new framing is rendered into their output.
 
 `config.yaml` contains the mixed-provider `ai_model_hierarchy`, ordered for
 quality first. The app skips providers without keys and tries each remaining

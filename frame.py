@@ -11,6 +11,7 @@ Output: clip_N/frame.json {width, height, segments:[{start, end, layout, crops:[
 """
 from __future__ import annotations
 
+import os
 import statistics
 from collections import Counter
 
@@ -27,6 +28,18 @@ CUT_THRESHOLD = 0.45    # histogram distance that counts as a shot change
 MIN_SHOT = 1.2          # shots shorter than this inherit the previous layout
 MIN_FACE_H = 0.07       # ignore faces smaller than 7% of frame height
 STACK_ASPECT = 1080 / 960
+
+
+def _suggested_layout_enabled() -> bool:
+    value = os.getenv("USE_SUGGESTED_VIDEO_LAYOUT", "true").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        "USE_SUGGESTED_VIDEO_LAYOUT must be a boolean "
+        "(true/false, yes/no, on/off, or 1/0)"
+    )
 
 
 def _even(v) -> int:
@@ -188,6 +201,12 @@ def build_video_segments(shots, W, H, video_type, detector_ok) -> list[dict]:
     return segs
 
 
+def build_auto_segments(shots, W, H, video_type, detector_ok, suggested_layouts=True) -> list[dict]:
+    if suggested_layouts:
+        return build_video_segments(shots, W, H, video_type, detector_ok)
+    return build_segments(shots, W, H, "auto", detector_ok)
+
+
 def _similar_composition(a: dict, b: dict, W: int) -> bool:
     first, second = a["composition"], b["composition"]
     if first["layout"] != second["layout"]:
@@ -250,10 +269,18 @@ def run(job, clip: dict):
     s, n = job.settings, clip["index"]
     key = f"clip_{n}.frame"
     video_layout_path = job.clip_dir(n) / "video_layout.json"
-    if job.should_skip(key) and (s.layout != "auto" or video_layout_path.exists()):
-        log.info(f"clip {n}: framing already decided - skipping")
-        with job.pipe.step("frame", f"clip {n} (cached)"):
-            return
+    suggested_layouts = s.layout == "auto" and _suggested_layout_enabled()
+    if job.should_skip(key):
+        layout_mode_matches = s.layout != "auto"
+        if s.layout == "auto":
+            previous_frame = job.load(f"clip_{n}", "frame.json", default={})
+            layout_mode_matches = (
+                previous_frame.get("suggested_video_layout_enabled", True) == suggested_layouts
+            )
+        if layout_mode_matches and (not suggested_layouts or video_layout_path.exists()):
+            log.info(f"clip {n}: framing already decided - skipping")
+            with job.pipe.step("frame", f"clip {n} (cached)"):
+                return
     meta = job.clip_meta(n)
     video_info = job.load("info.json", default={})
     video_type = video_layouts.classify_video(video_info)
@@ -261,14 +288,25 @@ def run(job, clip: dict):
         detector = FaceDetector(s.models_dir)
         W, H, shots = analyse(job.clip_dir(n) / "source.mp4", meta["trim_start"], meta["trim_end"], detector, step)
         if s.layout == "auto":
-            segs = build_video_segments(shots, W, H, video_type, detector.available)
+            segs = build_auto_segments(
+                shots, W, H, video_type, detector.available, suggested_layouts
+            )
         else:
             segs = build_segments(shots, W, H, s.layout, detector.available)
         if segs:
             segs[-1]["end"] = round(meta["trim_end"] - meta["trim_start"], 2)
-    job.save({"width": W, "height": H, "video_type": video_type, "segments": segs},
-             f"clip_{n}", "frame.json")
-    if s.layout == "auto":
+    job.save(
+        {
+            "width": W,
+            "height": H,
+            "video_type": video_type,
+            "suggested_video_layout_enabled": suggested_layouts,
+            "segments": segs,
+        },
+        f"clip_{n}",
+        "frame.json",
+    )
+    if suggested_layouts:
         schema = {
             "default_layout": video_layouts.LAYOUTS[video_type]["default_layout"],
             "layouts": dict(video_layouts.LAYOUTS[video_type]["layouts"]),
@@ -280,6 +318,8 @@ def run(job, clip: dict):
         schema["layouts"].setdefault(
             "smart_crop", video_layouts.LAYOUTS["general"]["layouts"]["smart_crop"])
         job.save({video_type: schema}, f"clip_{n}", "video_layout.json")
+    elif video_layout_path.exists():
+        video_layout_path.unlink()
     summary = Counter(sg.get("composition", {}).get("layout", sg["layout"]) for sg in segs)
     log.info(f"clip {n}: {len(shots)} shots -> {len(segs)} segments " +
              ", ".join(f"{k}x{v}" for k, v in summary.items()))
